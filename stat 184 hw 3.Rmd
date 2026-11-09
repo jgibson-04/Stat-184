@@ -1,0 +1,406 @@
+---
+title: "184 hw 3"
+author: "Jack"
+date: "2026-11-08"
+output: pdf_document
+---
+
+## Package
+```{r}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(sf)
+library(jsonlite)
+library(httr)
+
+vehicles <- ggplot2::mpg
+gems <- ggplot2::diamonds
+
+```
+
+
+## Problem 1: Reproduce and explain plots
+
+## Part A
+```{r}
+
+p1a <- ggplot(vehicles, aes(x = displ, y = hwy)) +
+  geom_point(aes(color = drv)) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  facet_wrap(~ drv) +
+  labs(
+    x = "Engine displacement (litres)",
+    y = "Highway fuel economy (mpg)",
+    color = "drv"
+  ) +
+  theme_bw()
+
+p1a
+
+```
+
+# Explanation:
+
+facet_wrap(~drv) splits the data into three panels, one per drv value. geom_smooth() fits its line separately inside each panel, using only the rows shown there. So each panel gets its own line even though color is mapped only inside geom_point. The facet instead of the color aesthetic, is what creates the three separate fits.
+
+
+## Part B 
+```{r}
+p1b_count <- ggplot(vehicles, aes(x = drv, fill = factor(cyl))) +
+  geom_bar() +
+  labs(x = "drv", y = "count", fill = "factor(cyl)") +
+  theme_bw()
+
+p1b_count
+
+p1b_prop <- ggplot(vehicles, aes(x = drv, fill = factor(cyl))) +
+  geom_bar(position = "fill") +
+  labs(x = "drv", y = "Proportion within drive type", fill = "factor(cyl)") +
+  theme_bw()
+
+p1b_prop
+```
+
+# Explanation:
+
+position = "fill" rescales every bar to the same height of 1. So each bar shows proportions, not raw counts. Drive types with few cars get stretched to the same height as drive types with a lot of cars. 
+Equal bar heights only represents cylinder proportions of each group that equates to 100 percents. The left plot is what shows the real sample sizes.
+
+
+## Part C
+
+```{r}
+gems_small <- gems %>% filter(carat <= 3)
+
+n_total    <- nrow(gems)
+n_retained <- nrow(gems_small)
+n_excluded <- n_total - n_retained
+
+cat("Records retained:", n_retained, "\n")
+cat("Records excluded:", n_excluded, "\n")
+
+x_range <- c(0, 3)
+
+p_fine <- ggplot(gems_small, aes(x = carat)) +
+  geom_histogram(binwidth = 0.01, boundary = 0, closed = "right") +
+  scale_x_continuous(limits = x_range) +
+  labs(title = "Bin width = 0.01", x = "Carat", y = "Count") +
+  theme_bw()
+
+p_coarse <- ggplot(gems_small, aes(x = carat)) +
+  geom_histogram(binwidth = 0.5, boundary = 0, closed = "right") +
+  scale_x_continuous(limits = x_range) +
+  labs(title = "Bin width = 0.5", x = "Carat", y = "Count") +
+  theme_bw()
+
+p_fine
+p_coarse
+
+```
+
+# Diamonds
+
+```{r}
+carat_counts <- gems %>%
+  filter(carat %in% c(0.99, 1.00)) %>%
+  count(carat)
+
+print(carat_counts)
+```
+
+
+# Feature easier to see with narrow bins:
+The fine bins show a sharp dip just below 1.00 carat and a tall spike right at 1.00 carat. Cutters shave stones down to just under a round number when it isn't worth the cost of keeping a few extra points. It then rounds up when a cheap cut gets them over the line whicg results in stones piling up near whole and half carats. The 0.5-width bins merge that whole region into a single wide bar and hide the pattern completely.
+
+
+## PROBLEMS 2-3
+
+```{r}
+dir.create("raw_data", showWarnings = FALSE)
+```
+
+
+```{r}
+get_all_rows <- function(resource_url, page_size = 1000) {
+  all_rows <- list()
+  offset <- 0
+  repeat {
+    url <- paste0(resource_url, "?$limit=", page_size, "&$offset=", offset)
+    page <- fromJSON(url, flatten = TRUE)
+    if (length(page) == 0 || nrow(page) == 0) break
+    all_rows[[length(all_rows) + 1]] <- page
+    offset <- offset + page_size
+    if (nrow(page) < page_size) break
+  }
+  bind_rows(all_rows)
+}
+
+libraries_raw <- get_all_rows("https://data.cityofchicago.org/resource/x8fc-8rcq.json")
+write_csv(libraries_raw, "raw_data/chicago_libraries_raw.csv")
+
+```
+
+
+```{r}
+areas_raw <- st_read(
+  "https://data.cityofchicago.org/resource/igwz-8jzy.geojson",
+  quiet = TRUE
+)
+st_write(areas_raw, "raw_data/chicago_community_areas_raw.geojson", delete_dsn = TRUE)
+```
+
+```{r}
+data_sources <- tibble(
+  dataset = c("Chicago Public Libraries - Locations", "Chicago Community Areas"),
+  source = c(
+    "City of Chicago Data Portal (data.cityofchicago.org), resource x8fc-8rcq",
+    "City of Chicago Data Portal (data.cityofchicago.org), resource igwz-8jzy"
+  ),
+  url = c(
+    "https://data.cityofchicago.org/resource/x8fc-8rcq.json",
+    "https://data.cityofchicago.org/resource/igwz-8jzy.geojson"
+  ),
+  accessed_date = as.character(Sys.Date())
+)
+
+write_csv(data_sources, "data_sources.csv")
+```
+
+
+## PROBLEM 2: 
+
+```{r}
+n_before_cleaning <- nrow(libraries_raw)
+
+get_col <- function(df, nm) if (nm %in% names(df)) df[[nm]] else NA
+
+lat_candidates <- c("location.latitude", "latitude", "location.lat")
+lon_candidates <- c("location.longitude", "longitude", "location.lon", "location.long")
+
+pick_first_present <- function(df, candidates) {
+  for (nm in candidates) if (nm %in% names(df)) return(df[[nm]])
+  rep(NA_character_, nrow(df))
+}
+
+raw_lat <- pick_first_present(libraries_raw, lat_candidates)
+raw_lon <- pick_first_present(libraries_raw, lon_candidates)
+
+if (all(is.na(raw_lat)) && "location.coordinates" %in% names(libraries_raw)) {
+  coords <- libraries_raw[["location.coordinates"]]
+  raw_lon <- sapply(coords, function(x) if (length(x) == 2) x[1] else NA)
+  raw_lat <- sapply(coords, function(x) if (length(x) == 2) x[2] else NA)
+}
+
+name_col <- if ("branch_" %in% names(libraries_raw)) {
+  libraries_raw[["branch_"]]
+} else if ("name" %in% names(libraries_raw)) {
+  libraries_raw[["name"]]
+} else {
+  paste("Library", seq_len(nrow(libraries_raw)))
+}
+
+libraries_clean <- libraries_raw %>%
+  mutate(
+    latitude  = as.numeric(raw_lat),
+    longitude = as.numeric(raw_lon),
+    facility_name = name_col
+  ) %>%
+  filter(!is.na(latitude), !is.na(longitude)) %>%
+  mutate(site_id = row_number()) %>%
+  select(site_id, facility_name, latitude, longitude)
+
+n_after_cleaning <- nrow(libraries_clean)
+n_dropped_missing_coords <- n_before_cleaning - n_after_cleaning
+n_duplicate_coords <- libraries_clean %>%
+  count(latitude, longitude) %>%
+  filter(n > 1) %>%
+  nrow()
+
+cat("Libraries before cleaning:", n_before_cleaning, "\n")
+cat("Libraries after cleaning:", n_after_cleaning, "\n")
+cat("Dropped for missing coordinates:", n_dropped_missing_coords, "\n")
+cat("Coordinate pairs shared by more than one record:", n_duplicate_coords, "\n")
+```
+
+```{r}
+sites_wgs84 <- st_as_sf(
+  libraries_clean,
+  coords = c("longitude", "latitude"),
+  crs = 4326
+)
+
+sites_m <- st_transform(sites_wgs84, crs = 26971)
+cat("sites_m CRS:", st_crs(sites_m)$Name, "- units: meters\n")
+
+```
+
+## p_sites
+```{r}
+p_sites <- ggplot() +
+  geom_sf(data = sites_m, color = "darkred", size = 1.2) +
+  labs(
+    title = "Chicago Public Library Locations",
+    caption = "Source: City of Chicago Data Portal (x8fc-8rcq), accessed 2026"
+  ) +
+  theme_bw()
+
+p_sites
+```
+## buffers and union areas
+
+```{r}
+buffer_500  <- st_buffer(sites_m, dist = 500)
+buffer_1000 <- st_buffer(sites_m, dist = 1000)
+
+union_500  <- st_union(buffer_500)
+union_1000 <- st_union(buffer_1000)
+
+area_500_km2  <- as.numeric(st_area(union_500))  / 1e6
+area_1000_km2 <- as.numeric(st_area(union_1000)) / 1e6
+
+stopifnot(area_1000_km2 >= area_500_km2)
+
+buffer_summary <- tibble(
+  radius_m = c(500, 1000),
+  union_area_km2 = c(area_500_km2, area_1000_km2)
+)
+
+print(buffer_summary)
+
+```
+
+## p_buffers
+
+```{r}
+p_buffers <- ggplot() +
+  geom_sf(data = union_500, fill = "steelblue", alpha = 0.4, color = NA) +
+  geom_sf(data = sites_m, color = "darkred", size = 1) +
+  labs(
+    title = "Libraries and Combined 500-Meter Service Buffer",
+    caption = "Source: City of Chicago Data Portal (x8fc-8rcq), accessed 2026"
+  ) +
+  theme_bw()
+
+p_buffers
+```
+
+## PROBLEM 3: 
+
+```{r}
+areas_clean <- areas_raw %>%
+  st_make_valid() %>%
+  mutate(
+    district_id = as.character(area_numbe),
+    district_name = community
+  ) %>%
+  filter(!is.na(district_id), !st_is_empty(geometry)) %>%
+  select(district_id, district_name, geometry)
+
+n_areas_before <- nrow(areas_raw)
+n_areas_after  <- nrow(areas_clean)
+n_dup_ids <- areas_clean %>% st_drop_geometry() %>%
+  count(district_id) %>% filter(n > 1) %>% nrow()
+
+cat("Community areas before cleaning:", n_areas_before, "\n")
+cat("Community areas after cleaning:", n_areas_after, "\n")
+cat("Duplicate district IDs:", n_dup_ids, "\n")
+
+areas_m <- st_transform(areas_clean, crs = st_crs(sites_m))
+```
+## match sites to exactly one area
+
+```{r}
+matches <- st_intersects(sites_m, areas_m)
+n_matches_per_site <- lengths(matches)
+
+site_match_audit <- tibble(
+  site_id = sites_m$site_id,
+  n_matches = n_matches_per_site
+) %>%
+  mutate(
+    matched_district_id = ifelse(
+      n_matches == 1,
+      areas_m$district_id[sapply(matches, function(x) if (length(x) == 1) x else NA)],
+      NA_character_
+    )
+  )
+
+write_csv(site_match_audit, "site_match_audit.csv")
+
+n_zero_matches <- sum(n_matches_per_site == 0)
+n_one_match    <- sum(n_matches_per_site == 1)
+n_multi_match  <- sum(n_matches_per_site > 1)
+
+cat("Sites matching zero areas:", n_zero_matches, "\n")
+cat("Sites matching exactly one area:", n_one_match, "\n")
+cat("Sites matching more than one area:", n_multi_match, "\n")
+```
+
+## district_counts
+```{r}
+site_counts <- site_match_audit %>%
+  filter(n_matches == 1) %>%
+  count(matched_district_id, name = "n_sites") %>%
+  rename(district_id = matched_district_id)
+
+areas_m <- areas_m %>%
+  mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+district_counts <- areas_m %>%
+  st_drop_geometry() %>%
+  left_join(site_counts, by = "district_id") %>%
+  mutate(
+    n_sites = ifelse(is.na(n_sites), 0, n_sites),
+    sites_per_km2 = n_sites / area_km2
+  ) %>%
+  select(district_id, district_name, n_sites, area_km2, sites_per_km2)
+
+stopifnot(all(district_counts$area_km2 > 0))
+stopifnot(sum(district_counts$n_sites) == n_one_match)
+
+print(district_counts)
+```
+
+
+## p_count and p_density
+
+```{r}
+areas_for_map <- areas_m %>%
+  left_join(district_counts %>% select(district_id, n_sites, sites_per_km2),
+            by = "district_id")
+
+p_count <- ggplot(areas_for_map) +
+  geom_sf(aes(fill = n_sites), color = "white", size = 0.1) +
+  scale_fill_viridis_c(name = "Libraries\n(count)") +
+  labs(
+    title = "Library Count by Chicago Community Area",
+    caption = paste0(
+      "Source: City of Chicago Data Portal (x8fc-8rcq, igwz-8jzy), accessed 2026. ",
+      n_zero_matches, " site(s) left unassigned."
+    )
+  ) +
+  theme_bw()
+
+p_count
+
+p_density <- ggplot(areas_for_map) +
+  geom_sf(aes(fill = sites_per_km2), color = "white", size = 0.1) +
+  scale_fill_viridis_c(name = expression("Libraries / " * km^2)) +
+  labs(
+    title = "Library Density by Chicago Community Area",
+    caption = paste0(
+      "Source: City of Chicago Data Portal (x8fc-8rcq, igwz-8jzy), accessed 2026. ",
+      n_zero_matches, " site(s) left unassigned."
+    )
+  ) +
+  theme_bw()
+
+p_density
+```
+
+# Interpretation:
+
+The raw count map tends to favor large community areas just because they cover more ground, not because libraries are more accessible there. The density map corrects for that by dividing by area. This way, small but well-served community areas can rank above large ones with only a few libraries spread over a lot of land. Comparing the two maps side by side shows which areas are genuinely well covered versus which just look that way because of their size.
